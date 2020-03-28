@@ -249,24 +249,37 @@ bool CheckAndRunWelcome()
 
 #pragma region Utilities
 
-void RefreshHandles()
+void RefreshHandles(DWORD delay = 0)
 {
-	if (Config::VERBOSE)
+	// std::lock_guard guard(run.taskbars_mutex);
+	const std::unique_lock<std::mutex> unique_lock(run.taskbars_mutex, std::try_to_lock); 
+	if (unique_lock.owns_lock())
 	{
-		Log::OutputMessage(L"Refreshing taskbar handles.");
+		if (Config::VERBOSE)
+		{
+			Log::OutputMessage(L"Refreshing taskbar handles.");
+		}
+		if (delay != 0) {
+			Sleep(delay);
+		}
+		// Older handles are invalid, so clear the map to be ready for new ones
+		run.taskbars.clear();
+
+		run.main_taskbar = Window::Find(L"Shell_TrayWnd");
+		run.taskbars[run.main_taskbar.monitor()] = { run.main_taskbar, &Config::REGULAR_APPEARANCE };
+
+		for (const Window secondtaskbar : Window::FindEnum(L"Shell_SecondaryTrayWnd"))
+		{
+			run.taskbars[secondtaskbar.monitor()] = { secondtaskbar, &Config::REGULAR_APPEARANCE };
+		}
+		if (Config::VERBOSE)
+		{
+			Log::OutputMessage(L"Refresh done.");
+		}
 	}
-
-	std::lock_guard guard(run.taskbars_mutex);
-
-	// Older handles are invalid, so clear the map to be ready for new ones
-	run.taskbars.clear();
-
-	run.main_taskbar = Window::Find(L"Shell_TrayWnd");
-	run.taskbars[run.main_taskbar.monitor()] = { run.main_taskbar, &Config::REGULAR_APPEARANCE };
-
-	for (const Window secondtaskbar : Window::FindEnum(L"Shell_SecondaryTrayWnd"))
+	else if (Config::VERBOSE)
 	{
-		run.taskbars[secondtaskbar.monitor()] = { secondtaskbar, &Config::REGULAR_APPEARANCE };
+		Log::OutputMessage(L"Refreshing by other EVENT. Skip.");
 	}
 }
 
@@ -518,12 +531,20 @@ void InitializeTray(const HINSTANCE &hInstance)
 
 	window.RegisterCallback(WM_DISPLAYCHANGE, [](...)
 	{
-		RefreshHandles();
+		if (Config::VERBOSE)
+		{
+			Log::OutputMessage(L"Try Refresh by WM_DISPLAYCHANGE");
+		}
+		RefreshHandles(50);
 		return 0;
 	});
 
 	window.RegisterCallback(WM_TASKBARCREATED, [](...)
 	{
+		if (Config::VERBOSE)
+		{
+			Log::OutputMessage(L"Try Refresh by WM_TASKBARCREATED");
+		}
 		RefreshHandles();
 		return 0;
 	});
@@ -644,7 +665,7 @@ void InitializeTray(const HINSTANCE &hInstance)
 			ApplyStock(EXCLUDE_FILE);
 			Blacklist::Parse(run.exclude_file);
 		});
-		tray.RegisterContextMenuCallback(IDM_REFRESHHANDLES, RefreshHandles);
+		tray.RegisterContextMenuCallback(IDM_REFRESHHANDLES, std::bind(&RefreshHandles, 0));
 		tray.RegisterContextMenuCallback(IDM_CLEARBLACKLISTCACHE, Blacklist::ClearCache);
 		tray.RegisterContextMenuCallback(IDM_EXITWITHOUTSAVING, std::bind(&ExitApp, EXITREASON::UserActionNoSave));
 
@@ -700,6 +721,10 @@ int WINAPI wWinMain(const HINSTANCE hInstance, HINSTANCE, wchar_t *, int)
 	InitializeTray(hInstance);
 
 	// Populate our map
+	if (Config::VERBOSE)
+	{
+		Log::OutputMessage(L"Try refresh Handles on startup.");
+	}
 	RefreshHandles();
 
 	// Undoc'd, allows to detect when Aero Peek starts and stops
@@ -716,6 +741,27 @@ int WINAPI wWinMain(const HINSTANCE hInstance, HINSTANCE, wchar_t *, int)
 	// Detect additional monitor connect/disconnect
 	EventHook creation_hook(
 		EVENT_OBJECT_CREATE,
+		EVENT_OBJECT_CREATE,
+		[](DWORD, const Window &window, ...)
+		{
+			// Log::OutputMessage(L"Received monitor event.");
+			if (window.valid())
+			{
+				if (const auto classname = window.classname(); *classname == L"Shell_TrayWnd" || *classname == L"Shell_SecondaryTrayWnd")
+				{
+					if (Config::VERBOSE)
+					{
+						Log::OutputMessage(L"Try refresh Handles by EVENT_OBJECT_CREATE.");
+					}
+					RefreshHandles(400);
+				}
+			}
+		},
+		WINEVENT_OUTOFCONTEXT
+	);
+
+	EventHook destroy_hook(
+		EVENT_OBJECT_DESTROY,
 		EVENT_OBJECT_DESTROY,
 		[](DWORD, const Window &window, ...)
 		{
@@ -723,7 +769,11 @@ int WINAPI wWinMain(const HINSTANCE hInstance, HINSTANCE, wchar_t *, int)
 			{
 				if (const auto classname = window.classname(); *classname == L"Shell_TrayWnd" || *classname == L"Shell_SecondaryTrayWnd")
 				{
-					RefreshHandles();
+					if (Config::VERBOSE)
+					{
+						Log::OutputMessage(L"Try refresh Handles by EVENT_OBJECT_DESTROY.");
+					}
+					RefreshHandles(40);
 				}
 			}
 		},
